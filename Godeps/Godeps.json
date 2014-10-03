@@ -1,0 +1,10 @@
+{
+	"ImportPath": "github.com/radiodan/cease",
+	"GoVersion": "go1.3.3",
+	"Deps": [
+		{
+			"ImportPath": "github.com/streadway/amqp",
+			"Rev": "7d6d1802c7710be39564a287f860360c6328f956"
+		}
+	]
+}
