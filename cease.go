@@ -98,7 +98,7 @@ func listenForCommand(host string, port int) {
 		}
 	}()
 
-	log.Printf("[*] Waiting for logs. To exit press CTRL+C")
+	log.Printf("[*] Waiting for commands")
 	<-forever
 }
 
@@ -114,7 +114,7 @@ func processMessage(msg amqp.Delivery) {
 	err := json.Unmarshal(msg.Body, &cmd)
 	failOnError(err, "Malformed Radiodan Command")
 
-	log.Printf("[x] Received Action: %s", cmd.Action)
+	log.Printf("[x] Received action: %s", cmd.Action)
 
 	execCmd(cmd)
 }
@@ -123,10 +123,13 @@ func execCmd(cmd RadiodanCommand) {
 	var shutdownFlag, path string
 	var args []string
 
-	if cmd.Action == "shutdown" {
-		shutdownFlag = "-h"
-	} else {
+	switch cmd.Action {
+	case "restart":
 		shutdownFlag = "-r"
+	case "shutdown":
+		shutdownFlag = "-h"
+	default:
+		panic("Action " + cmd.Action + " is neither restart nor shutdown")
 	}
 
 	if dryRun {
