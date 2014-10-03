@@ -113,7 +113,7 @@ func processMessage(msg amqp.Delivery) {
 	err := json.Unmarshal(msg.Body, &cmd)
 	failOnError(err, "Malformed Radiodan Command")
 
-	log.Printf("[x] %s", cmd.Action)
+	log.Printf("[x] Received Action: %s", cmd.Action)
 
 	execCmd(cmd)
 }
