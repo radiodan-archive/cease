@@ -1,13 +1,22 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"os/exec"
+	"strings"
 
 	"github.com/streadway/amqp"
 )
+
+type RadiodanCommand struct {
+	Action        string
+	CorrelationId string
+}
+
+var dryRun bool
 
 func main() {
 	host, port := parseArgs()
@@ -17,6 +26,7 @@ func main() {
 func parseArgs() (host string, port int) {
 	flag.StringVar(&host, "host", "localhost", "Hostname for RabbitMQ")
 	flag.IntVar(&port, "port", 5672, "Port for RabbitMQ")
+	flag.BoolVar(&dryRun, "dry-run", false, "Dry Run (do not execute command)")
 
 	flag.Parse()
 
@@ -25,10 +35,8 @@ func parseArgs() (host string, port int) {
 
 func listenForCommand(host string, port int) {
 	amqpUri := fmt.Sprintf("amqp://%s:%d", host, port)
-	//amqpUri := fmt.Sprintf("amqp://%s", host)
 	exchangeName := "radiodan"
-	//routingKey := "radiodan.system.shutdown"
-	routingKey := "command.*.*"
+	routingKey := "command.device.shutdown"
 
 	conn, err := amqp.Dial(amqpUri)
 	failOnError(err, "Cannot connect")
@@ -84,34 +92,59 @@ func listenForCommand(host string, port int) {
 	forever := make(chan bool)
 
 	go func() {
-		for d := range msgs {
-			log.Printf(" [x] %s", d.Body)
+		for m := range msgs {
+			processMessage(m)
 		}
 	}()
 
-	log.Printf(" [*] Waiting for logs. To exit press CTRL+C")
+	log.Printf("[*] Waiting for logs. To exit press CTRL+C")
 	<-forever
 }
 
-func execCmd(shutdownType string) {
-	var shutdownFlag string
+func processMessage(msg amqp.Delivery) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Println("[!] Msg processing failed:", r)
+		}
+	}()
 
-	if shutdownType == "shutdown" {
+	cmd := RadiodanCommand{}
+
+	err := json.Unmarshal(msg.Body, &cmd)
+	failOnError(err, "Malformed Radiodan Command")
+
+	log.Printf("[x] %s", cmd.Action)
+
+	execCmd(cmd)
+}
+
+func execCmd(cmd RadiodanCommand) {
+	var shutdownFlag, path string
+
+	if cmd.Action == "shutdown" {
 		shutdownFlag = "-h"
 	} else {
 		shutdownFlag = "-r"
 	}
 
+	if dryRun {
+		path = "/bin/echo"
+	} else {
+		path = "/sbin/shutdown"
+	}
+
+	args := []string{path, shutdownFlag, "now"}
+
 	shutdown := exec.Cmd{
-		Path: "/sbin/shutdown",
-		Args: []string{"/sbin/shutdown", shutdownFlag, "now"},
+		Path: path,
+		Args: args,
 	}
 
 	output, err := shutdown.CombinedOutput()
+	outputStr := strings.TrimRight(string(output), "\n")
 
 	failOnError(err, "Could not exec shutdown")
-
-	log.Println("exec:", output)
+	log.Println("[x] exec:", outputStr)
 }
 
 func failOnError(err error, msg string) {
