@@ -120,6 +120,7 @@ func processMessage(msg amqp.Delivery) {
 
 func execCmd(cmd RadiodanCommand) {
 	var shutdownFlag, path string
+	var args []string
 
 	if cmd.Action == "shutdown" {
 		shutdownFlag = "-h"
@@ -129,11 +130,11 @@ func execCmd(cmd RadiodanCommand) {
 
 	if dryRun {
 		path = "/bin/echo"
+		args = []string{"shutdown", path, shutdownFlag, "now"}
 	} else {
 		path = "/sbin/shutdown"
+		args = []string{path, shutdownFlag, "now"}
 	}
-
-	args := []string{path, shutdownFlag, "now"}
 
 	shutdown := exec.Cmd{
 		Path: path,
