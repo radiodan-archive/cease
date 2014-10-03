@@ -69,7 +69,6 @@ func listenForCommand(host string, port int) {
 	)
 	failOnError(err, "Failed to declare a queue")
 
-	fmt.Println("queue name", q.Name)
 	err = ch.QueueBind(
 		q.Name,     // queue name
 		routingKey, // routing key
@@ -88,6 +87,8 @@ func listenForCommand(host string, port int) {
 		nil,    // args
 	)
 	failOnError(err, "Failed to register a consumer")
+
+	log.Println("[*] Consuming", q.Name)
 
 	forever := make(chan bool)
 
