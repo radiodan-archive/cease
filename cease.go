@@ -7,6 +7,7 @@ import (
 	"log"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/streadway/amqp"
 )
@@ -37,10 +38,22 @@ func listenForCommand(host string, port int) {
 	amqpUri := fmt.Sprintf("amqp://%s:%d", host, port)
 	exchangeName := "radiodan"
 	routingKey := "command.device.shutdown"
+	connected := false
 
-	conn, err := amqp.Dial(amqpUri)
-	failOnError(err, "Cannot connect")
-	defer conn.Close()
+	var conn *amqp.Connection
+
+	for connected != true {
+		tryConn, err := amqp.Dial(amqpUri)
+		if err != nil {
+			log.Printf("[!] Cannot connect", err)
+			log.Printf("[*] Retry in 3 seconds")
+			time.Sleep(3 * time.Second)
+		} else {
+			connected = true
+			conn = tryConn
+			defer conn.Close()
+		}
+	}
 
 	log.Printf("[*] Connected to %s", amqpUri)
 
