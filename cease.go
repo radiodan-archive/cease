@@ -49,13 +49,13 @@ func listenForCommand(host string, port int) {
 			log.Printf("[*] Retry in 3 seconds")
 			time.Sleep(3 * time.Second)
 		} else {
+			log.Printf("[*] Connected to %s", amqpUri)
+
 			connected = true
 			conn = tryConn
 			defer conn.Close()
 		}
 	}
-
-	log.Printf("[*] Connected to %s", amqpUri)
 
 	ch, err := conn.Channel()
 	failOnError(err, "Failed to open a channel")
