@@ -17,6 +17,12 @@ type RadiodanCommand struct {
 	CorrelationId string
 }
 
+func (cmd *RadiodanCommand) IsValid() (isValid bool) {
+	isValid = (cmd.Action == "restart" || cmd.Action == "shutdown")
+
+	return
+}
+
 var dryRun bool
 
 func main() {
@@ -114,7 +120,14 @@ func listenForCommand(host string, port int) {
 		for m := range msgs {
 			cmd, err := processMessage(m)
 
-			if err == nil {
+			if err != nil {
+				log.Printf("[!] Malformed Radiodan Command: %s", err)
+				continue
+			}
+
+			if cmd.IsValid() {
+				log.Printf("[x] Received action: %s", cmd.Action)
+
 				replyToMessage(replyChannel, m, cmd, false)
 				execCmd(cmd)
 			} else {
@@ -127,21 +140,11 @@ func listenForCommand(host string, port int) {
 	<-forever
 }
 
-func processMessage(msg amqp.Delivery) (RadiodanCommand, error) {
-	defer func() {
-		if r := recover(); r != nil {
-			log.Println("[!] Msg processing failed:", r)
-		}
-	}()
+func processMessage(msg amqp.Delivery) (cmd RadiodanCommand, err error) {
+	cmd = RadiodanCommand{}
+	err = json.Unmarshal(msg.Body, &cmd)
 
-	cmd := RadiodanCommand{}
-
-	err := json.Unmarshal(msg.Body, &cmd)
-	failOnError(err, "[!] Malformed Radiodan Command")
-
-	log.Printf("[x] Received action: %s", cmd.Action)
-
-	return cmd, err
+	return
 }
 
 func replyToMessage(replyChannel *amqp.Channel, msg amqp.Delivery,
