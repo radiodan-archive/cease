@@ -18,6 +18,7 @@ type RadiodanCommand struct {
 }
 
 var dryRun bool
+var conn *amqp.Connection
 
 func main() {
 	host, port := parseArgs()
@@ -39,8 +40,6 @@ func listenForCommand(host string, port int) {
 	exchangeName := "radiodan"
 	routingKey := "command.device.shutdown"
 	connected := false
-
-	var conn *amqp.Connection
 
 	for connected != true {
 		tryConn, err := amqp.Dial(amqpUri)
@@ -107,7 +106,12 @@ func listenForCommand(host string, port int) {
 
 	go func() {
 		for m := range msgs {
-			processMessage(m)
+			cmd, err := processMessage(m)
+
+			if err == nil {
+				replyToMessage(m, cmd)
+				execCmd(cmd)
+			}
 		}
 	}()
 
@@ -115,7 +119,7 @@ func listenForCommand(host string, port int) {
 	<-forever
 }
 
-func processMessage(msg amqp.Delivery) {
+func processMessage(msg amqp.Delivery) (RadiodanCommand, error) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Println("[!] Msg processing failed:", r)
@@ -129,7 +133,34 @@ func processMessage(msg amqp.Delivery) {
 
 	log.Printf("[x] Received action: %s", cmd.Action)
 
-	execCmd(cmd)
+	return cmd, err
+}
+
+func replyToMessage(msg amqp.Delivery, cmd RadiodanCommand) {
+	var err error
+
+	response := "{\"error\": false, \"correlationId\": \"" + cmd.CorrelationId + "\"}"
+
+	replyChannel, err := conn.Channel()
+	failOnError(err, "[!] Could not create reply channel")
+
+	reply := amqp.Publishing{
+		DeliveryMode: amqp.Persistent,
+		Timestamp:    time.Now(),
+		ContentType:  "text/plain",
+		Body:         []byte(response),
+	}
+
+	err = replyChannel.Publish(
+		"",          // exchange
+		msg.ReplyTo, // key
+		false,       // mandatory
+		false,       // thing
+		reply,       // immediate
+	)
+
+	failOnError(err, "[!] Could not reply to command")
+	log.Println("[*] Replying to message", response)
 }
 
 func execCmd(cmd RadiodanCommand) {
