@@ -18,7 +18,6 @@ type RadiodanCommand struct {
 }
 
 var dryRun bool
-var conn *amqp.Connection
 
 func main() {
 	host, port := parseArgs()
@@ -36,6 +35,8 @@ func parseArgs() (host string, port int) {
 }
 
 func listenForCommand(host string, port int) {
+	var conn *amqp.Connection
+
 	amqpUri := fmt.Sprintf("amqp://%s:%d", host, port)
 	exchangeName := "radiodan"
 	routingKey := "command.device.shutdown"
@@ -56,11 +57,15 @@ func listenForCommand(host string, port int) {
 		}
 	}
 
-	ch, err := conn.Channel()
-	failOnError(err, "Failed to open a channel")
-	defer ch.Close()
+	consumeChannel, err := conn.Channel()
+	failOnError(err, "[!] Failed to open a channel")
+	defer consumeChannel.Close()
 
-	err = ch.ExchangeDeclare(
+	replyChannel, err := conn.Channel()
+	failOnError(err, "[!] Could not create reply channel")
+	defer replyChannel.Close()
+
+	err = consumeChannel.ExchangeDeclare(
 		exchangeName, // name
 		"topic",      // type
 		true,         // durable
@@ -69,9 +74,9 @@ func listenForCommand(host string, port int) {
 		false,        // no-wait
 		nil,          // arguments
 	)
-	failOnError(err, "Failed to declare an exchange")
+	failOnError(err, "[!] Failed to declare an exchange")
 
-	q, err := ch.QueueDeclare(
+	queue, err := consumeChannel.QueueDeclare(
 		"",    // name
 		false, // durable
 		false, // delete when usused
@@ -79,28 +84,29 @@ func listenForCommand(host string, port int) {
 		false, // no-wait
 		nil,   // arguments
 	)
-	failOnError(err, "Failed to declare a queue")
+	failOnError(err, "[!] Failed to declare a queue")
 
-	err = ch.QueueBind(
-		q.Name,     // queue name
+	err = consumeChannel.QueueBind(
+		queue.Name, // queue name
 		routingKey, // routing key
 		"radiodan", // exchange
 		false,
-		nil)
-	failOnError(err, "Failed to bind a queue")
-
-	msgs, err := ch.Consume(
-		q.Name, // queue
-		"",     // consumer
-		true,   // auto ack
-		false,  // exclusive
-		false,  // no local
-		false,  // no wait
-		nil,    // args
+		nil,
 	)
-	failOnError(err, "Failed to register a consumer")
+	failOnError(err, "[!] Failed to bind a queue")
 
-	log.Println("[*] Consuming", q.Name)
+	msgs, err := consumeChannel.Consume(
+		queue.Name, // queue
+		"",         // consumer
+		true,       // auto ack
+		false,      // exclusive
+		false,      // no local
+		false,      // no wait
+		nil,        // args
+	)
+	failOnError(err, "[!] Failed to register a consumer")
+
+	log.Println("[*] Consuming", queue.Name)
 
 	forever := make(chan bool)
 
@@ -109,8 +115,10 @@ func listenForCommand(host string, port int) {
 			cmd, err := processMessage(m)
 
 			if err == nil {
-				replyToMessage(m, cmd)
+				replyToMessage(replyChannel, m, cmd, false)
 				execCmd(cmd)
+			} else {
+				replyToMessage(replyChannel, m, cmd, true)
 			}
 		}
 	}()
@@ -129,20 +137,18 @@ func processMessage(msg amqp.Delivery) (RadiodanCommand, error) {
 	cmd := RadiodanCommand{}
 
 	err := json.Unmarshal(msg.Body, &cmd)
-	failOnError(err, "Malformed Radiodan Command")
+	failOnError(err, "[!] Malformed Radiodan Command")
 
 	log.Printf("[x] Received action: %s", cmd.Action)
 
 	return cmd, err
 }
 
-func replyToMessage(msg amqp.Delivery, cmd RadiodanCommand) {
-	var err error
-
-	response := "{\"error\": false, \"correlationId\": \"" + cmd.CorrelationId + "\"}"
-
-	replyChannel, err := conn.Channel()
-	failOnError(err, "[!] Could not create reply channel")
+func replyToMessage(replyChannel *amqp.Channel, msg amqp.Delivery,
+	cmd RadiodanCommand, parseError bool) {
+	response := fmt.Sprintf(
+		"{\"error\": %t, \"correlationId\": \"%s\"}",
+		parseError, cmd.CorrelationId)
 
 	reply := amqp.Publishing{
 		DeliveryMode: amqp.Persistent,
@@ -151,7 +157,7 @@ func replyToMessage(msg amqp.Delivery, cmd RadiodanCommand) {
 		Body:         []byte(response),
 	}
 
-	err = replyChannel.Publish(
+	err := replyChannel.Publish(
 		"",          // exchange
 		msg.ReplyTo, // key
 		false,       // mandatory
@@ -159,7 +165,7 @@ func replyToMessage(msg amqp.Delivery, cmd RadiodanCommand) {
 		reply,       // immediate
 	)
 
-	failOnError(err, "[!] Could not reply to command")
+	failOnError(err, "[!] Could not reply to message")
 	log.Println("[*] Replying to message", response)
 }
 
@@ -178,7 +184,7 @@ func execCmd(cmd RadiodanCommand) {
 
 	if dryRun {
 		path = "/bin/echo"
-		args = []string{"shutdown", path, shutdownFlag, "now"}
+		args = []string{path, "shutdown", shutdownFlag, "now"}
 	} else {
 		path = "/sbin/shutdown"
 		args = []string{path, shutdownFlag, "now"}
