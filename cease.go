@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -9,19 +8,25 @@ import (
 	"strings"
 	"time"
 
-	"github.com/streadway/amqp"
+	zmq "github.com/pebbe/zmq4"
 )
 
-type RadiodanCommand struct {
-	Action        string
-	CorrelationId string
-}
+const (
+	HEARTBEAT_LIVENESS = 3
+	HEARTBEAT_INTERVAL = 2500 * time.Millisecond
+	HEARTBEAT_EXPIRY   = HEARTBEAT_INTERVAL * HEARTBEAT_LIVENESS
+	PROTOCOL_CLIENT    = "MDPC02"
+	PROTOCOL_WORKER    = "MDPW02"
+)
 
-func (cmd *RadiodanCommand) IsValid() (isValid bool) {
-	isValid = (cmd.Action == "restart" || cmd.Action == "shutdown")
-
-	return
-}
+const (
+	_ = string(int(iota))
+	COMMAND_READY
+	COMMAND_REQUEST
+	COMMAND_REPLY
+	COMMAND_HEARTBEAT
+	COMMAND_DISCONNECT
+)
 
 var dryRun bool
 
@@ -31,8 +36,8 @@ func main() {
 }
 
 func parseArgs() (host string, port int) {
-	flag.StringVar(&host, "host", "localhost", "Hostname for RabbitMQ")
-	flag.IntVar(&port, "port", 5672, "Port for RabbitMQ")
+	flag.StringVar(&host, "host", "localhost", "Hostname for broker")
+	flag.IntVar(&port, "port", 7171, "Port for RPC on broker")
 	flag.BoolVar(&dryRun, "dry-run", false, "Dry Run (do not execute command)")
 
 	flag.Parse()
@@ -40,149 +45,112 @@ func parseArgs() (host string, port int) {
 	return
 }
 
+func readySocket(socket *zmq.Socket) {
+	log.Println("[*] Registering service device.shutdown")
+	socket.SendMessage(PROTOCOL_WORKER, COMMAND_READY, "device.shutdown")
+}
+
 func listenForCommand(host string, port int) {
-	var conn *amqp.Connection
+	brokerURL := fmt.Sprintf("tcp://%s:%d", host, port)
 
-	amqpUri := fmt.Sprintf("amqp://%s:%d", host, port)
-	exchangeName := "radiodan"
-	routingKey := "command.device.shutdown"
-	connected := false
+	context, err := zmq.NewContext()
+	failOnError(err, "Cannot create context")
 
-	for connected != true {
-		tryConn, err := amqp.Dial(amqpUri)
+	socket, err := context.NewSocket(zmq.DEALER)
+	failOnError(err, "Cannot create socket")
+
+	socket.SetIdentity("radiodan-cease")
+
+	err = socket.Connect(brokerURL)
+	failOnError(err, "Cannot connect to broker")
+
+	defer socket.Close()
+
+	readySocket(socket)
+
+	// TODO: send message registering services
+
+	log.Println("[*] Consuming")
+
+	poller := zmq.NewPoller()
+	poller.Add(socket, zmq.POLLIN)
+
+	for {
+		var polled []zmq.Polled
+
+		polled, err = poller.Poll(HEARTBEAT_INTERVAL)
+
 		if err != nil {
-			log.Printf("[!] Cannot connect", err)
-			log.Printf("[*] Retry in 3 seconds")
-			time.Sleep(3 * time.Second)
-		} else {
-			log.Printf("[*] Connected to %s", amqpUri)
-
-			connected = true
-			conn = tryConn
-			defer conn.Close()
+			break //  Interrupted
 		}
-	}
 
-	consumeChannel, err := conn.Channel()
-	failOnError(err, "[!] Failed to open a channel")
-	defer consumeChannel.Close()
-
-	replyChannel, err := conn.Channel()
-	failOnError(err, "[!] Could not create reply channel")
-	defer replyChannel.Close()
-
-	err = consumeChannel.ExchangeDeclare(
-		exchangeName, // name
-		"topic",      // type
-		true,         // durable
-		false,        // auto-deleted
-		false,        // internal
-		false,        // no-wait
-		nil,          // arguments
-	)
-	failOnError(err, "[!] Failed to declare an exchange")
-
-	queue, err := consumeChannel.QueueDeclare(
-		"",    // name
-		false, // durable
-		false, // delete when usused
-		true,  // exclusive
-		false, // no-wait
-		nil,   // arguments
-	)
-	failOnError(err, "[!] Failed to declare a queue")
-
-	err = consumeChannel.QueueBind(
-		queue.Name, // queue name
-		routingKey, // routing key
-		"radiodan", // exchange
-		false,
-		nil,
-	)
-	failOnError(err, "[!] Failed to bind a queue")
-
-	msgs, err := consumeChannel.Consume(
-		queue.Name, // queue
-		"",         // consumer
-		true,       // auto ack
-		false,      // exclusive
-		false,      // no local
-		false,      // no wait
-		nil,        // args
-	)
-	failOnError(err, "[!] Failed to register a consumer")
-
-	log.Println("[*] Consuming", queue.Name)
-
-	forever := make(chan bool)
-
-	go func() {
-		for m := range msgs {
-			cmd, err := processMessage(m)
-
+		if len(polled) > 0 {
+			msg, err := socket.RecvMessage(0)
 			if err != nil {
-				log.Printf("[!] Malformed Radiodan Command: %s", err)
-				continue
+				break //  Interrupted
 			}
 
-			if cmd.IsValid() {
-				log.Printf("[x] Received action: %s", cmd.Action)
+			log.Printf("I: received message from broker: %q\n", msg)
 
-				replyToMessage(replyChannel, m, cmd, false)
-				execCmd(cmd)
-			} else {
-				replyToMessage(replyChannel, m, cmd, true)
+			switch msg[0] {
+			case COMMAND_REQUEST:
+				log.Println("REQUEST")
+
+				if len(msg) < 6 {
+					log.Printf("!: len(msg) < 6")
+					continue
+				}
+
+				sender := msg[1]
+				correlationId := msg[2]
+				serviceType := msg[3]
+				serviceInstance := msg[4]
+				cmd := msg[5]
+
+				if serviceType != "device" || serviceInstance != "shutdown" {
+					log.Printf("!: Invalid service %s.%s", serviceType, serviceInstance)
+					continue
+				}
+
+				isValid := (cmd == "restart" || cmd == "shutdown")
+
+				if isValid == true {
+					execCmd(cmd)
+					socket.SendMessage(
+						PROTOCOL_WORKER, COMMAND_REQUEST, sender, correlationId,
+					)
+				} else {
+					errMsg, _ := fmt.Printf("!: Invalid command %s", cmd)
+					log.Println(errMsg)
+					socket.SendMessage(
+						PROTOCOL_WORKER, COMMAND_REQUEST, sender, correlationId, errMsg,
+					)
+				}
+			case COMMAND_HEARTBEAT:
+				log.Println("HEARTBEAT")
+				//socket.SendMessage(PROTOCOL_WORKER, COMMAND_HEARTBEAT)
+			case COMMAND_DISCONNECT:
+				// Attempt to reconnect
+				log.Println("DISCONNECT")
+				readySocket(socket)
+			default:
+				log.Printf("E: invalid input message %q\n", msg)
 			}
 		}
-	}()
-
-	log.Printf("[*] Waiting for commands")
-	<-forever
-}
-
-func processMessage(msg amqp.Delivery) (cmd RadiodanCommand, err error) {
-	cmd = RadiodanCommand{}
-	err = json.Unmarshal(msg.Body, &cmd)
-
-	return
-}
-
-func replyToMessage(replyChannel *amqp.Channel, msg amqp.Delivery,
-	cmd RadiodanCommand, parseError bool) {
-	response := fmt.Sprintf(
-		"{\"error\": %t, \"correlationId\": \"%s\"}",
-		parseError, cmd.CorrelationId)
-
-	reply := amqp.Publishing{
-		DeliveryMode: amqp.Persistent,
-		Timestamp:    time.Now(),
-		ContentType:  "text/plain",
-		Body:         []byte(response),
 	}
-
-	err := replyChannel.Publish(
-		"",          // exchange
-		msg.ReplyTo, // key
-		false,       // mandatory
-		false,       // thing
-		reply,       // immediate
-	)
-
-	failOnError(err, "[!] Could not reply to message")
-	log.Println("[*] Replying to message", response)
 }
 
-func execCmd(cmd RadiodanCommand) {
+func execCmd(action string) {
 	var shutdownFlag, path string
 	var args []string
 
-	switch cmd.Action {
+	switch action {
 	case "restart":
 		shutdownFlag = "-r"
 	case "shutdown":
 		shutdownFlag = "-h"
 	default:
-		panic("Action " + cmd.Action + " is neither restart nor shutdown")
+		panic("Action " + action + " is neither restart nor shutdown")
 	}
 
 	if dryRun {
