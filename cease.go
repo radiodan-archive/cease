@@ -76,41 +76,56 @@ func listenForCommand(host string, port int) {
 	poller := zmq.NewPoller()
 	poller.Add(socket, zmq.POLLIN)
 
+Poll:
 	for {
 		var polled []zmq.Polled
 
 		polled, err = poller.Poll(HEARTBEAT_INTERVAL)
 
 		if err != nil {
-			break //  Interrupted
+			log.Printf("!: %s", err)
+			break Poll
 		}
 
 		if len(polled) > 0 {
 			msg, err := socket.RecvMessage(0)
 			if err != nil {
-				break //  Interrupted
+				log.Printf("!: %s", err)
+				break Poll
 			}
 
-			log.Printf("I: received message from broker: %q\n", msg)
+			log.Printf("I: Received message: %q\n", msg)
 
+			// NOTE: There is no fall-through, BROKER & CLIENT protocols are accepted
 			switch msg[0] {
+			case PROTOCOL_BROKER:
+			case PROTOCOL_CLIENT:
+			case PROTOCOL_WORKER:
+				log.Println("W: Rejecting message from Worker")
+				continue Poll
+			default:
+				log.Printf("W: Rejecting message with unknown protocol %s", msg[0])
+				continue Poll
+			}
+
+			switch msg[1] {
 			case COMMAND_REQUEST:
-				log.Println("REQUEST")
+				log.Println("I: REQUEST")
 
 				if len(msg) < 6 {
 					log.Printf("!: len(msg) < 6")
-					continue
+					continue Poll
 				}
 
-				sender := msg[1]
-				correlationId := msg[2]
-				serviceType := msg[3]
-				serviceInstance := msg[4]
-				cmd := msg[5]
+				sender := msg[2]
+				correlationId := msg[3]
+				serviceType := msg[4]
+				serviceInstance := msg[5]
+				cmd := msg[6]
 
 				if serviceType != "device" || serviceInstance != "shutdown" {
 					log.Printf("!: Invalid service %s.%s", serviceType, serviceInstance)
-					continue
+					continue Poll
 				}
 
 				isValid := (cmd == "restart" || cmd == "shutdown")
@@ -128,14 +143,15 @@ func listenForCommand(host string, port int) {
 					)
 				}
 			case COMMAND_HEARTBEAT:
-				log.Println("HEARTBEAT")
-				//socket.SendMessage(PROTOCOL_WORKER, COMMAND_HEARTBEAT)
+				log.Println("I: HEARTBEAT")
+				socket.SendMessage(PROTOCOL_WORKER, COMMAND_HEARTBEAT)
 			case COMMAND_DISCONNECT:
 				// Attempt to reconnect
-				log.Println("DISCONNECT")
+				log.Println("I: DISCONNECT")
 				readySocket(socket)
 			default:
 				log.Printf("E: invalid input message %q\n", msg)
+				continue Poll
 			}
 		}
 	}
